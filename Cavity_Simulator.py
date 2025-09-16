@@ -192,11 +192,14 @@ class Cavity_MechanicalModes(gym.Env):
         # Reset to initialize
         self.reset()
         
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+    def reset(self, vforward = None,seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
         """Reset the simulation to initial conditions (Gymnasium interface)."""
         super().reset(seed=seed)
-        
-        self.cavity_voltage = np.zeros(1, dtype=np.complex128)
+        if vforward is None:
+            self.cavity_voltage = np.zeros(1, dtype=np.complex128)
+        else: 
+            self.cavity_voltage = 2*vforward
+
         self.detuning_mode = np.zeros(self.N, dtype=np.float32)
         self.dotdetuning_mode = np.zeros(self.N, dtype=np.float32)
         self.detuning_total = np.zeros(1,dtype=np.float32)
@@ -240,7 +243,8 @@ class Cavity_MechanicalModes(gym.Env):
         return {
             'time': self.time,
             'step_count': self.step_count,
-            'drive_force': self.drive_history[-1] if self.drive_history else 0.0
+            'drive_force': self.drive_history[-1] if self.drive_history else 0.0,
+            'detuning': self.detuning_total_history[-1] if self.detuning_total_history else 0.0
         } 
 
     #The step def does the calculation of the cavity voltage and the detuning
@@ -271,10 +275,11 @@ class Cavity_MechanicalModes(gym.Env):
         k_micro = self.k_micro
         Ang_w = self.angular_mech_w**2
         Leff=self.Leff
-        
+       
+
         DW_k=self.detuning_mode # will be in place of DW [k]
         self.detuning_mode += self.dotdetuning_mode * self.dt # this is DW [k+1]
-        right_term_mode = -k_LFD* Ang_w * np.abs(V_k /(1e6*Leff) )**2 + k_piezo* Ang_w * piezo + k_micro* Ang_w * microphonics -(2 / self.tau_mode) * self.dotdetuning_mode - Ang_w * DW_k
+        right_term_mode = -k_LFD* Ang_w * np.abs((V_k-2*forward_voltage)/(1e6*Leff) )**2 + k_piezo* Ang_w * piezo + k_micro* Ang_w * microphonics -(2 / self.tau_mode) * self.dotdetuning_mode - Ang_w * DW_k
         self.dotdetuning_mode += right_term_mode * self.dt
 
         self.detuning_total=np.sum(self.detuning_mode)
