@@ -1,6 +1,6 @@
 import numpy as np
 from Cavity_Simulator import Cavity_MechanicalModes
-#from pid_controller import PIDController
+from pid_controller import PIDController
 import time
 # Example usage and demonstration
 if __name__ == "__main__":
@@ -69,8 +69,8 @@ if __name__ == "__main__":
     for i in range(100000):  #100 ms. 
         t = oscillators.time
         force0 = RL * Amp * ( (t >= t1) * (t < tfill) + ratio * (t >= tfill) * (t < tflat) ) # This forward voltage
-        force1 = 0.5 * np.cos(2 * np.pi* 10 *t)  #piezo 
-        force2 = 0.1 * np.sin(2 * np.pi * 0.5 * t) #microphonics
+        force1 = 0.5 * np.cos(2 * np.pi* 10 *t)
+        force2 = 0.1 * np.sin(2 * np.pi * 0.5 * t)
         force = [force0, force1, force2]
         obs, term ,trunc , info = oscillators.step(force)  #ensure to include the RL term 
         
