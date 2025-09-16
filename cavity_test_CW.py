@@ -1,6 +1,8 @@
 import numpy as np
 from Cavity_Simulator import Cavity_MechanicalModes
+from ANC_LMS_controller import ANC_LMS_Control
 #from pid_controller import PIDController
+import matplotlib.pyplot as plt
 import time
 # Example usage and demonstration
 if __name__ == "__main__":
@@ -53,7 +55,9 @@ if __name__ == "__main__":
 
     # the dt value must be smaller than 1e-6 s, incresing the time step will lead to numerical 
     oscillators = Cavity_MechanicalModes(N = 10, Leff=Leff, k_LFD = k_L, k_piezo=k_P,k_micro=k_M, w_half = whalf, tau_mode = tau_m , angular_mech_w= O_m,
-                                         dt=1e-6)
+                                         dt=0.05e-6)
+    wfreq_comp=2*np.pi*np.array([5, 10 ,20 ,50])
+    LMS_contoller = ANC_LMS_Control(mu=1e-9, eta = 1e-9, wfreq_comp = wfreq_comp,dt=0.05e-6)
 
     print("Cavity driven by Lorentz Force Detuning (LFD) Simulation")
     print("=" * 40)
@@ -63,24 +67,37 @@ if __name__ == "__main__":
     print(f"Angular mechanical frquencies: {oscillators.angular_mech_w}")
     print(f"Time step: {oscillators.dt}")
     print()
+    LMS_data = {'time': [], 'force1': [], 'force2': []}
 
-    
-    obs, info = oscillators.reset()
-    for i in range(100000):  #100 ms. 
+    force0 = RL * Amp  # This forward voltage
+    obs, info = oscillators.reset(0.5*force0+0j)
+    LMS_contoller.reset()
+    detuning = 0.0
+    for i in range(20000000):  # 1 s. 
         t = oscillators.time
-        force0 = RL * Amp * ( (t >= t1) * (t < tfill) + ratio * (t >= tfill) * (t < tflat) ) # This forward voltage
-        force1 = 0.5 * np.cos(2 * np.pi* 10 *t)  #piezo 
-        force2 = 0.1 * np.sin(2 * np.pi * 0.5 * t) #microphonics
-        force = [force0, force1, force2]
-        obs, term ,trunc , info = oscillators.step(force)  #ensure to include the RL term 
-        
+        force1 = LMS_contoller.update(detuning,t)   #piezo 
+        force2 = 0.01 * np.sin(2 * np.pi * 5 * t) + 0.01 * np.sin(2 * np.pi * 10 * t) + 0.01 * np.sin(2 * np.pi * 20 * t) +  0.01 * np.sin(2 * np.pi * 50 * t) #microphonics 
+        force = [0.5*force0, force1, force2]
+        obs, term ,trunc , info = oscillators.step(force) 
+        detuning = info['detuning']
+        LMS_data['time'].append(t)
+        LMS_data['force1'].append(force1)
+        LMS_data['force2'].append(force2)
+
     end_time = time.time()
     elapsed_time = end_time - start_time
     print(f"Execution time : {elapsed_time} s")
 
     oscillators.plot_results()
     print()
-    
+
+    plt.figure(figsize=(12, 10))
+        
+    # Position tracking
+    plt.plot(LMS_data['time'], LMS_data['force1'], 'r', linewidth=2, label='piezo')
+    plt.plot(LMS_data['time'], LMS_data['force2'], 'g', linewidth=2, label='microphonics')
+    plt.tight_layout()
+    plt.show()
     print(f"Simulation completed: {len(oscillators.time_history)} time steps")
     print(f"Final time: {oscillators.time:.2f} s")
     print()
