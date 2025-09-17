@@ -1,11 +1,12 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.integrate import RK45
 import gymnasium as gym
 from gymnasium import spaces
 from typing import Callable, Optional, List, Tuple, Dict, Any, Union
 from pathlib import Path
 
-class Cavity_MechanicalModes(gym.Env):
+class cavity_simulation(gym.Env):
     """
     Cavity simulation as a Gymnasium environment.
     
@@ -247,6 +248,40 @@ class Cavity_MechanicalModes(gym.Env):
             'detuning': self.detuning_total_history[-1] if self.detuning_total_history else 0.0
         } 
 
+    def cavity_dynamics(self,action):
+        """
+        Defines the system of first-order voltage calculation, solving for V.
+        It also 
+        The state vector y is [Dw1...DwN, dDwdt1...dDwdtN, v_real, v_imag].
+        """
+
+        #This will hold the input power, needs be implemented and the piezo [0]  and [1] to the piezo. 
+        # Handle action input
+        V_forward = float(action[0]) # units of V
+        piezo = np.clip(action[1], -self.max_piezo, self.max_piezo) # units of voltage
+        microphonics = float(action[2]) #units of Torr
+    
+        v_complex = self.cavity_voltage
+        # --- Define the derivatives ---
+        Dw_array = self.detuning_mode
+        dDwdt_array = self.dotdetuning_mode    
+        
+        detuning_total = np.sum(self.detuning_mode)
+        dvdt_complex = (-self.w_half + detuning_total * 1j) * v_complex + 2 * self.w_half * V_forward
+
+        k_LFD = self.k_LFD
+        k_piezo = self.k_piezo
+        k_micro = self.k_micro
+        Leff=self.Leff
+        Angw_squared = self.angular_mech_w**2
+        D2wdt2_array = - (2 / self.tau_mode) * dDwdt_array - Angw_squared * Dw_array -Angw_squared * k_LFD * np.abs((v_complex-25.95) / Leff)**2 + Angw_squared * k_piezo * piezo + Angw_squared * k_micro * microphonics    
+    
+        dv_real_dt = dvdt_complex.real
+        dv_imag_dt = dvdt_complex.imag
+    
+        # Combine all derivatives into a single flat array to return
+        return np.concatenate([dDwdt_array, D2wdt2_array, [dv_real_dt, dv_imag_dt]])
+
     #The step def does the calculation of the cavity voltage and the detuning
     def step(self, action):
         """
@@ -257,34 +292,19 @@ class Cavity_MechanicalModes(gym.Env):
         action : np.ndarray or float
             Drive force applied to oscillator 0
         """
-        #This will hold the input power, needs be implemented and the piezo [0]  and [1] to the piezo. 
-        # Handle action input
         forward_voltage = float(action[0]) # units of V
-        piezo = np.clip(action[1], -self.max_piezo, self.max_piezo) # units of voltage
-        microphonics = float(action[2]) #units of Torr
 
-        # Uses simple Euler method to solve equations  
-        # Update values for the detuning modes, and all modes 
-        #Solving for cavity voltage, 1st order ODE, Note that the drive force has the term RL 
-        V_k = self.cavity_voltage # V[k]
-        right_term_cavity = (-self.w_half + self.detuning_total * 1j) * self.cavity_voltage + 2 * self.w_half * forward_voltage
-        self.cavity_voltage += right_term_cavity* self.dt #This will end up being v[k+1]
-       
-        k_LFD = self.k_LFD
-        k_piezo = self.k_piezo
-        k_micro = self.k_micro
-        Ang_w = self.angular_mech_w**2
-        Leff=self.Leff
-       
+        # use RK45 solver, the time step is not constant in this scheme. 
+        solver = RK45(
+            fun = self.cavity_dynamics(action),
+            t0 = self.time,
+            y0 = [self.detuning_mode,self.dotdetuning_mode,[self.cavity_voltage,0]], #sets the inital conditions
+            rtol = 1e-6,
+            t_bound = self.time + self.dt)      
 
-        DW_k=self.detuning_mode # will be in place of DW [k]
-        self.detuning_mode += self.dotdetuning_mode * self.dt # this is DW [k+1]
-        right_term_mode = -k_LFD* Ang_w * np.abs((V_k-2*forward_voltage)/(1e6*Leff) )**2 + k_piezo* Ang_w * piezo + k_micro* Ang_w * microphonics -(2 / self.tau_mode) * self.dotdetuning_mode - Ang_w * DW_k
-        self.dotdetuning_mode += right_term_mode * self.dt
-
+        solver.step()
+        
         self.detuning_total=np.sum(self.detuning_mode)
-
-        #print(f"V_k {np.abs(V_k / 1e6)**2}")
 
         # Update time and step count
         self.time += self.dt

@@ -1,5 +1,5 @@
 import numpy as np
-from Cavity_Simulator import Cavity_MechanicalModes
+from Cavity_Simulator import cavity_simulation
 from ANC_LMS_controller import ANC_LMS_Control
 #from pid_controller import PIDController
 import matplotlib.pyplot as plt
@@ -54,13 +54,12 @@ if __name__ == "__main__":
 
 
     # the dt value must be smaller than 1e-6 s, incresing the time step will lead to numerical 
-    oscillators = Cavity_MechanicalModes(N = 10, Leff=Leff, k_LFD = k_L, k_piezo=k_P,k_micro=k_M, w_half = whalf, tau_mode = tau_m , angular_mech_w= O_m,
+    oscillators = cavity_simulation(N = 10, Leff=Leff, k_LFD = k_L, k_piezo=k_P,k_micro=k_M, w_half = whalf, tau_mode = tau_m , angular_mech_w= O_m,
                                          dt=0.05e-6)
     wfreq_comp=2*np.pi*np.array([5, 10 ,20 ,50])
     LMS_contoller = ANC_LMS_Control(mu=1e-9, eta = 1e-9, wfreq_comp = wfreq_comp,dt=0.05e-6)
 
     print("Cavity driven by Lorentz Force Detuning (LFD) Simulation")
-    print("=" * 40)
     print(f"Number of oscillators: {oscillators.N}")
     print(f"Lorentz Force Detuning Coefficients: {oscillators.k_LFD}")
     print(f"Mode time constants: {oscillators.tau_mode}")
