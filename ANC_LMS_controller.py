@@ -59,8 +59,7 @@ class ANC_LMS_Control:
         self.eta = eta
         self.wfreq_comp = wfreq_comp
         self.dt = dt
-        self.output_limits = output_limits
-                
+
         # Internal state
         self.reset()
     
@@ -86,7 +85,6 @@ class ANC_LMS_Control:
         float
             Control voltage to apply to the piezo
         """
-        #Currently I_m is ill defined, all other terms also 
         I_m = self.I_mk
         Q_m = self.Q_mk
         phi_m = self.phi_mk 
@@ -103,11 +101,6 @@ class ANC_LMS_Control:
         # Calculate total output, this is based on the input from the user
         #output = proportional + integral + derivative
         output = np.sum(piezo_m)
-
-
-        # Apply output limits
-        if self.output_limits:
-            output = np.clip(output, *self.output_limits)
         
         # Store for next iteration
         self.I_mk = I_m
@@ -115,7 +108,3 @@ class ANC_LMS_Control:
         self.phi_mk = phi_m
         
         return output
-    
-    def set_limits(self, output_limits: Optional[Tuple[float, float]] = None):
-        """Update controller limits."""
-        self.output_limits = output_limits

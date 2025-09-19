@@ -54,10 +54,10 @@ if __name__ == "__main__":
 
 
     # the dt value must be smaller than 1e-6 s, incresing the time step will lead to numerical 
-    oscillators = cavity_simulation(N = 10, Leff=Leff, k_LFD = k_L, k_piezo=k_P,k_micro=k_M, w_half = whalf, tau_mode = tau_m , angular_mech_w= O_m,
-                                         dt=0.05e-6)
     wfreq_comp=2*np.pi*np.array([5, 10 ,20 ,50])
-    LMS_contoller = ANC_LMS_Control(mu=1e-9, eta = 1e-9, wfreq_comp = wfreq_comp,dt=0.05e-6)
+    oscillators = cavity_simulation(N = 10, Leff=Leff, k_LFD = k_L, k_piezo=k_P,k_micro=k_M, w_half = whalf, tau_mode = tau_m , angular_mech_w= O_m, wfreq_comp = wfreq_comp,
+                                         dt=1e-6)
+    LMS_contoller = ANC_LMS_Control(mu=1e-9, eta = 1e-9, wfreq_comp = wfreq_comp,dt=1e-6)
 
     print("Cavity driven by Lorentz Force Detuning (LFD) Simulation")
     print(f"Number of oscillators: {oscillators.N}")
@@ -66,23 +66,21 @@ if __name__ == "__main__":
     print(f"Angular mechanical frquencies: {oscillators.angular_mech_w}")
     print(f"Time step: {oscillators.dt}")
     print()
-    LMS_data = {'time': [], 'force1': [], 'force2': []}
+    LMS_data = {'time': [], 'force1': []}
 
     force0 = RL * Amp  # This forward voltage
-    obs, info = oscillators.reset(0.5*force0+0j)
+    obs, info = oscillators.reset(0.5*force0)
     LMS_contoller.reset()
     detuning = 0.0
-    for i in range(20000000):  # 1 s. 
+    for i in range(1000000):  # 1 s. 
         t = oscillators.time
         force1 = LMS_contoller.update(detuning,t)   #piezo 
-        force2 = 0.01 * np.sin(2 * np.pi * 5 * t) + 0.01 * np.sin(2 * np.pi * 10 * t) + 0.01 * np.sin(2 * np.pi * 20 * t) +  0.01 * np.sin(2 * np.pi * 50 * t) #microphonics 
-        force = [0.5*force0, force1, force2]
+        force = [0.5*force0, force1]
         obs, term ,trunc , info = oscillators.step(force) 
 
         detuning = info['detuning']
         LMS_data['time'].append(t)
         LMS_data['force1'].append(force1)
-        LMS_data['force2'].append(force2)
 
     end_time = time.time()
     elapsed_time = end_time - start_time
@@ -95,10 +93,8 @@ if __name__ == "__main__":
         
     # Position tracking
     plt.plot(LMS_data['time'], LMS_data['force1'], 'r', linewidth=2, label='piezo')
-    plt.plot(LMS_data['time'], LMS_data['force2'], 'g', linewidth=2, label='microphonics')
     plt.tight_layout()
     plt.show()
     print(f"Simulation completed: {len(oscillators.time_history)} time steps")
     print(f"Final time: {oscillators.time:.2f} s")
     print()
-    

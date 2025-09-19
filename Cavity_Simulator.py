@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.integrate import RK45
 import gymnasium as gym
 from gymnasium import spaces
 from typing import Callable, Optional, List, Tuple, Dict, Any, Union
@@ -18,8 +17,8 @@ class cavity_simulation(gym.Env):
     """
     
     def __init__(self, N: int = 3, Leff : float=1.01 , k_LFD = None, k_piezo = None, k_micro = None, 
-                w_half: float = 2*np.pi*20, tau_mode = None, angular_mech_w = None, dt: float = 0.01, 
-                max_piezo: float = 120, max_episode_steps: int = 1000, observation_noise_std: float = 0.0,
+                w_half: float = 2*np.pi*20, tau_mode = None, angular_mech_w = None, wfreq_comp = None, dt: float = 0.01, 
+                max_piezo: float = 120, max_episode_steps: int = 1000, observation_noise_std: float = 0.0, operation: str = "pulsed",
                 config_file: Optional[Union[str, Path]] = None):
         """
         Initialize the coupled oscillators system as a Gymnasium environment.
@@ -67,9 +66,11 @@ class cavity_simulation(gym.Env):
         # Load configuration from file if provided
         if config_file is not None:
             try:
-                from .config import ExperimentConfig
+                from config.config import ExperimentConfig
             except ImportError:
-                from config import ExperimentConfig
+                import sys
+                sys.path.append('../')
+                from config.config import ExperimentConfig
             
             config = ExperimentConfig(config_file)
             sim_config = config.get_simulation_config()
@@ -84,20 +85,57 @@ class cavity_simulation(gym.Env):
             tau_mode = sim_config.get('tau_mode', tau_mode)
             angular_mech_w = sim_config.get('angular_mech_w', angular_mech_w)
             dt = sim_config.get('dt', dt)
-            max_force = sim_config.get('max_force', max_force)
+            max_piezo = sim_config.get('max_piezo', max_piezo)
             max_episode_steps = sim_config.get('max_episode_steps', max_episode_steps)
             observation_noise_std = sim_config.get('observation_noise_std', observation_noise_std)
+            
+            # Store derived parameters for internal force calculations
+            self.RL = sim_config.get('RL')
+            self.Amp = sim_config.get('Amp') 
+            self.t1 = sim_config.get('t1')
+            self.tfill = sim_config.get('tfill')
+            self.tflat = sim_config.get('tflat')
+            self.ratio = sim_config.get('ratio')
+            self.repetition_period = 1.0 / sim_config.get('repetition_rate', 20)  # Convert Hz to period
             
 
         self.N = N
         self.w_half= w_half
         self.Leff = Leff
+        self.wfreq_comp = wfreq_comp
+        self.operation = operation
         self.dt = dt
         self.max_piezo = max_piezo
         self.max_episode_steps = max_episode_steps
         
         # Observation noise parameters
         self.observation_noise_std = observation_noise_std
+
+        # Store derived parameters for internal force calculations
+        # Set defaults if no config file is provided
+        if config_file is None:
+            # Calculate basic defaults - these won't be realistic but allow basic operation
+            # For realistic operation, use a configuration file
+            Q0_default = 2.7e10
+            Qext_default = 3e6
+            beta_default = Q0_default / Qext_default
+            QL_default = Q0_default / (1 + beta_default)
+            RQ_default = 341
+            RL_default = (0.5 * RQ_default) * QL_default
+            accelerating_gradient_default = 25e6
+            Amp_default = (accelerating_gradient_default * Leff) / RL_default
+            tau_default = 2 * QL_default / (2 * np.pi * 650e6)
+            
+            self.RL = RL_default
+            self.Amp = Amp_default
+            self.t1 = 1e-3
+            self.tfill = self.t1 + tau_default * np.log(2)
+            self.tflat = self.tfill + self.t1
+            self.ratio = (1 - np.exp(-(self.tfill - self.t1) / tau_default))
+            self.repetition_period = 0.05  # 20 Hz
+        
+        self.microphonics_amplitude = 0.1  # Default microphonics amplitude
+        self.microphonics_frequency = 0.5  # Default microphonics frequency (Hz)
         
         # Setup angular mechanical frequencies
         if angular_mech_w is None:
@@ -164,10 +202,10 @@ class cavity_simulation(gym.Env):
 
 
 
-        # Gymnasium spaces
-        # Action space: continuous drive force applied to oscillator 0
+        # Gymnasium spaces  
+        # Action space: piezo voltage only
         self.action_space = spaces.Box(
-            low=-max_piezo, high=max_piezo, shape=(1,), dtype=np.float32
+            low=-max_piezo, high=max_piezo, shape=(), dtype=np.float32
         )
 
         # Observation space: position and velocity of the observation oscillator
@@ -198,19 +236,22 @@ class cavity_simulation(gym.Env):
         super().reset(seed=seed)
         if vforward is None:
             self.cavity_voltage = np.zeros(1, dtype=np.complex128)
+            self.y = np.concatenate([np.zeros(2 * self.N), [0.0, 0.0]])
         else: 
             self.cavity_voltage = 2*vforward
+            self.y = np.concatenate([np.zeros(2 * self.N), [2*vforward, 0.0]])
 
         self.detuning_mode = np.zeros(self.N, dtype=np.float32)
         self.dotdetuning_mode = np.zeros(self.N, dtype=np.float32)
         self.detuning_total = np.zeros(1,dtype=np.float32)
         self.time = 0.0
         self.step_count = 0
+
         self.time_history = []
         self.cavity_voltage_history = []
         self.detuning_total_history = []
         self.drive_history = []
-        
+
         # Add small random perturbations for varied initial conditions
         if seed is not None:
             np.random.seed(seed)
@@ -247,8 +288,8 @@ class cavity_simulation(gym.Env):
             'drive_force': self.drive_history[-1] if self.drive_history else 0.0,
             'detuning': self.detuning_total_history[-1] if self.detuning_total_history else 0.0
         } 
-
-    def cavity_dynamics(self,action):
+   
+    def cavity_dynamics(self,t,y,drive):
         """
         Defines the system of first-order voltage calculation, solving for V.
         It also 
@@ -257,30 +298,51 @@ class cavity_simulation(gym.Env):
 
         #This will hold the input power, needs be implemented and the piezo [0]  and [1] to the piezo. 
         # Handle action input
-        V_forward = float(action[0]) # units of V
-        piezo = np.clip(action[1], -self.max_piezo, self.max_piezo) # units of voltage
-        microphonics = float(action[2]) #units of Torr
+
+        """        t_mod = t % self.repetition_period  # Modulo with repetition period
+
+        # Forward voltage calculation (from original cavity_test.py)
+        if self.RL is not None and self.Amp is not None:
+            forward_voltage = self.RL * self.Amp * ( 
+                (t_mod >= self.t1) * (t_mod < self.tfill) + 
+                self.ratio * (t_mod >= self.tfill) * (t_mod < self.tflat) 
+            )
+        else:
+            forward_voltage = 0.0  # No forward power if parameters not set
+        """    
+        forward_voltage = drive[0]    
+        #********** Microphonics calculation********************************************
+        # The slow variation models the drift in pressure of the helium bath of the cavity  
+        microphonics_slow = 0.01 * np.sin(2 * np.pi * 0.5 * t)*0 
+        # the sinousoid model vacuum pumps, other static vibrations. 
+        microphonics_sinousoid = np.sum( 0.05 * np.sin(self.wfreq_comp * t))
+        microphonics = microphonics_slow + microphonics_sinousoid
     
-        v_complex = self.cavity_voltage
-        # --- Define the derivatives ---
-        Dw_array = self.detuning_mode
-        dDwdt_array = self.dotdetuning_mode    
-        
-        detuning_total = np.sum(self.detuning_mode)
-        dvdt_complex = (-self.w_half + detuning_total * 1j) * v_complex + 2 * self.w_half * V_forward
+        Dw_modes = y[0:self.N]  #detuning modes, /Delta /omega
+        dDwdt_modes = y[self.N:2*self.N]  #derivative of detuning modes, d(/Delta /omega)/dt
+        vcavity_real = y[2*self.N] #cavity voltage real
+        vcavity_imag = y[2*self.N + 1] #cavity voltage imaginary         
+        vcavity_complex = vcavity_real + 1j * vcavity_imag
+
+        detuning_total = np.sum(Dw_modes)
+        piezo = np.clip(drive[1], -self.max_piezo, self.max_piezo)   
+
+
+        # Derivatve of the cavity voltage 
+        dvdt_complex = (-self.w_half + detuning_total * 1j) * vcavity_complex + 2 * self.w_half * forward_voltage
 
         k_LFD = self.k_LFD
         k_piezo = self.k_piezo
         k_micro = self.k_micro
         Leff=self.Leff
         Angw_squared = self.angular_mech_w**2
-        D2wdt2_array = - (2 / self.tau_mode) * dDwdt_array - Angw_squared * Dw_array -Angw_squared * k_LFD * np.abs((v_complex-25.95) / Leff)**2 + Angw_squared * k_piezo * piezo + Angw_squared * k_micro * microphonics    
-    
+        # Second derivate of the detuning modes
+        D2wdt2_modes = - (2 / self.tau_mode) * dDwdt_modes - Angw_squared * Dw_modes -Angw_squared * k_LFD * np.abs((vcavity_complex-2*forward_voltage) /(1e6*Leff))**2 + Angw_squared * k_piezo * piezo + Angw_squared * k_micro * microphonics    
         dv_real_dt = dvdt_complex.real
         dv_imag_dt = dvdt_complex.imag
-    
+
         # Combine all derivatives into a single flat array to return
-        return np.concatenate([dDwdt_array, D2wdt2_array, [dv_real_dt, dv_imag_dt]])
+        return np.concatenate([dDwdt_modes, D2wdt2_modes, [dv_real_dt, dv_imag_dt]])
 
     #The step def does the calculation of the cavity voltage and the detuning
     def step(self, action):
@@ -292,19 +354,21 @@ class cavity_simulation(gym.Env):
         action : np.ndarray or float
             Drive force applied to oscillator 0
         """
-        forward_voltage = float(action[0]) # units of V
+        forward_voltage = float(action[0]) # units of V 
+        # --- RK4 Method ---
+        k1 = self.dt * self.cavity_dynamics(self.time, self.y,action)
+        k2 = self.dt * self.cavity_dynamics(self.time + 0.5 * self.dt, self.y + 0.5 * k1 * self.dt, action)
+        k3 = self.dt * self.cavity_dynamics(self.time + 0.5 * self.dt, self.y + 0.5 * k2 * self.dt, action)
+        k4 = self.dt * self.cavity_dynamics(self.time + self.dt, self.y + k3*self.dt, action)
+            
+        # Update state and time, note that y is [Dw1...DwN, dDwdt1...dDwdtN, v_real, v_imag].
+        self.y += (k1 + 2*k2 + 2*k3 + k4) / 6.0 # the result is k+1 , step of dt
+        detuning_mode = self.y[0:self.N]
+        vcavity_real = self.y[2*self.N]
+        vcavity_imag = self.y[2*self.N + 1]
+        self.cavity_voltage = vcavity_real + vcavity_imag*1j
 
-        # use RK45 solver, the time step is not constant in this scheme. 
-        solver = RK45(
-            fun = self.cavity_dynamics(action),
-            t0 = self.time,
-            y0 = [self.detuning_mode,self.dotdetuning_mode,[self.cavity_voltage,0]], #sets the inital conditions
-            rtol = 1e-6,
-            t_bound = self.time + self.dt)      
-
-        solver.step()
-        
-        self.detuning_total=np.sum(self.detuning_mode)
+        self.detuning_total=np.sum(detuning_mode)
 
         # Update time and step count
         self.time += self.dt
